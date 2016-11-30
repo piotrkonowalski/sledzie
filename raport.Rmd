@@ -1,0 +1,499 @@
+---
+title: "Raport"
+author: "Piotr Konowalski"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    keep_md: yes
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, include = FALSE)
+library(plyr)
+library(ggplot2)
+library(plotly)
+library(knitr)
+library(data.table)
+library(caret)
+library(dplyr)
+
+set.seed(111)
+```
+
+```{r load_data, cache=TRUE}
+dt <- data.frame(read.csv("sledzie.csv"))
+```
+
+```{r cleanse, cache=TRUE}
+dt[dt == "?"] <- NA
+write.csv(dt, "sledzie_na.csv", row.names = FALSE)
+dt <- read.csv("sledzie_na.csv")
+```
+
+##Podsumowanie analizy
+Analiza otrzymanych danych była procesem wieloetapowym. Ze względu na znaczną liczbę pustych wartości konieczne okazało się poradzenie sobie z tym problemem przed podjęciem kolejnych kroków. Niekompletne przypadki dopasowano do najbardziej im podobnych i na tej podstawie uzupełniono brakujące wartości. W ogólności dane wzbudzają pewne podejrzenia co do swojej autentyczności, dlatego też wynik analizy może nie być w pełni zgodny z rzeczywistymi obserwacjami. W ramach projektu przeprowadzono liczne próby przekształcenia danych do postaci bardziej czytelnej i łatwiejszej w analizie. Ostatecznie utworzono regresor przewidujący rozmiar śledzia i na jego podstawie wyznaczono atrybuty mające największy wpływ na spadek rozmiaru śledzia oceanicznego w ostatnich latach. Z analizy wynika, że najbardziej prawdopodobną przyczyną takiego stanu rzeczy jest podnosząca się temperatura przy powierzchni wody.
+
+##Opis danych
+Na przestrzeni ostatnich lat zauważono stopniowy spadek rozmiaru śledzia oceanicznego wyławianego w Europie. Do analizy zebrano pomiary śledzi i warunków w jakich żyją z ostatnich 60 lat. Dane były pobierane z połowów komercyjnych jednostek. W ramach połowu jednej jednostki losowo wybierano od 50 do 100 sztuk trzyletnich śledzi. Dane dostępne są pod adresem: http://www.cs.put.poznan.pl/dbrzezinski/teaching/zed/sledzie.csv.
+
+Kolejne kolumny w zbiorze danych to:
+
+* X: numer wiersza
+* length: długość złowionego śledzia [cm];
+* cfin1: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 1];
+* cfin2: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 2];
+* chel1: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 1];
+* chel2: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2];
+* lcop1: dostępność planktonu [zagęszczenie widłonogów gat. 1];
+* lcop2: dostępność planktonu [zagęszczenie widłonogów gat. 2];
+* fbar: natężenie połowów w regionie [ułamek pozostawionego narybku];
+* recr: roczny narybek [liczba śledzi];
+* cumf: łączne roczne natężenie połowów w regionie [ułamek pozostawionego narybku];
+* totaln: łączna liczba ryb złowionych w ramach połowu [liczba śledzi];
+* sst: temperatura przy powierzchni wody [°C];
+* sal: poziom zasolenia wody [Knudsen ppt];
+* xmonth: miesiąc połowu [numer miesiąca];
+* nao: oscylacja północnoatlantycka [mb].
+
+Wiersze w zbiorze są uporządkowane chronologicznie.
+
+##Uzupełnienie brakujących danych
+W celu uzupełnienia pustych wartości posłużono się obseracją, iż wiele wierszy danych wielokrotnie się powtarza. Na przykład wiesze z przedziału 0-282 (z pominięciem kolumn X, length i xmonth) są identyczne. Ta tendencja utrzymuje się w całym zbiorze danych. Co najbardziej zaskakujące powtarzające się dane występują nie tylko zaraz po sobie, ale również w znacznych odstepach - biorąc pod uwagę fakt, że dane pochodzą z 60 lat - nawet w odstępach wieloletnich. 
+
+Wykorzystując ten fakt postanowiono pogrupować dane korzystając z następujących kolumn: cfin1, cfin2, chel1, chel2, lcop1, lcop2, fbar, recr, cumf, totaln, sst, sal, nao (wszystkie atrybuty oprócz X, length i xmonth).
+
+```{r groupingForNA, include=TRUE}
+dtc <- dt[complete.cases(dt), ]
+grouped <- dtc %>% 
+  group_by(cfin1, cfin2, chel1, chel2, lcop1, lcop2, fbar, recr, cumf, totaln, sst, sal, nao) %>% 
+  summarise(length=mean(length), n=max(X)) %>% 
+  select(c(n, length, everything()))
+```
+
+Po wykonaniu grupowania otrzymano `r nrow(grouped)` wierszy. Następnie utworzono dwie funkcje: 
+
+* filled - uzupełnianie wartości pustych w ramach pojedynczego wiersza na podstawie danych ze zgupowanej kolekcji 
+* substituteNA - wywoływanie w pętli dla wszystkch wierszy zawierających puste dane funkcji filled
+
+```{r substituteNaFunc, include=TRUE}
+filled <- function(row){
+  v <- select(row, -X, -xmonth, -length)
+  v <- unlist(v)
+  notNaNames <- names(v[!is.na(v)])
+  naNames <- names(v[is.na(v)])
+  semi_join(grouped, row, by=notNaNames)
+}
+
+substituteNA <- function(tab){
+  for(i in 1:nrow(tab)){
+    row <- tab[i,]
+    if(anyNA(row)){
+        v <- unlist(row)
+        naNames <- names(v[is.na(v)])
+        tab[i, naNames] <- filled(row)[1, naNames]
+    }
+  }
+  tab
+}
+```
+
+Po uruchomieniu funkcji substituteNA na danych wszystkie wartości puste zostały uzupełnione
+
+```{r substituteNA, cache=TRUE, include=TRUE}
+dt <- substituteNA(dt)
+```
+
+##Podsumowanie zbioru i podstawowe statystyki
+
+```{r summary, include=TRUE}
+kable(summary(dt[,1:8]))
+kable(summary(dt[,9:16]))
+```
+
+##Dodanie atrybutu period
+Ze względu na obserwację poczynioną przy uzupełnianiu brakujących wartości związaną ze znaczną liczbą powtarzających się wartości podjęto próbę uzupełnienia danych o sztuczną kolumnę "period". Ponieważ w danych brakuje kolumny przechowującej informację o roku pobrania próbki postanowiono wprowadzić atrybut definiujący okres, w którym dokonano obserwacji. Nie będzie to oczywiście atrybut o identycznym rozkładzie co potencjalny rok, ale może on się okazać bardzo przydatny w dalszej analizie i wizualizacji danych.
+
+W tym celu utworzono funkcję addPeriod:
+
+```{r addPeriod, cache=TRUE, include=TRUE}
+addPeriod <- function(tab){
+  compareNames <- names(tab[0,] %>% select(-X, -length, -xmonth))
+  current <- unlist(tab[1,][compareNames])
+  period <- 1
+  periodCol <- c()
+  
+  for(i in 1:nrow(tab)){
+    row <- tab[i,]
+    compareRow <- unlist(row[compareNames])
+    if(!identical(current, compareRow)){
+        current <- compareRow
+        period <- period + 1
+    }
+    
+    periodCol <- c(periodCol, period)
+  }
+  
+  withPeriod <- cbind(tab, period=periodCol)
+  withPeriod
+}
+
+dt <- addPeriod(dt)
+```
+
+Wartość atrybutu period jest ustalana przez ciąg powtarzających się bezpośrednio po sobie takich samych wierszy (z pominięciem kolumn X, length oraz xmonth). W momencie, gdy którakolwiek z wartości w wierszu się zmieni tworzony jest kolejny okres.
+
+Po uruchomieniu funkcji na zbiorze danych otrzymano `r dt[nrow(dt), "period"]` okresów
+
+##Szczegółowa analiza wartości atrybutów
+
+### length - długość śledzia z uwzględnieniem okresu
+```{r lengthPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE}
+ggplot(data=dt, aes(length, fill=factor(floor(period/100)*100))) + 
+  geom_histogram(breaks=seq(19, 33, by = 0.5)) + 
+  labs(fill="period") +
+  xlab("length (długość)") + 
+  ylab("liczba obserwacji")
+```
+
+Na powyższym wykresie można z łatwością zauważyć że rozkład długości śledzia przesuwa się w lewo wraz z upływem czasu.
+
+###cfin1: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 1]
+```{r cfin1Plot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(cfin1, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 5, by = 1)) + 
+  labs(fill="length") +
+  xlab("cfin1 (dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 1])") + 
+  ylab("liczba obserwacji")
+```
+
+###cfin2: dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 2]
+```{r cfin2Plot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(cfin2, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 20, by = 1)) + 
+  labs(fill="length") +
+  xlab("cfin1 (dostępność planktonu [zagęszczenie Calanus finmarchicus gat. 2])") + 
+  ylab("liczba obserwacji")
+```
+
+###chel1: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 1]
+```{r chel1Plot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(chel1, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 75, by = 5)) + 
+  labs(fill="length") +
+  xlab("chel1 (dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 1])") + 
+  ylab("liczba obserwacji")
+```
+
+###chel2: dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2]
+```{r chel2Plot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(chel2, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 60, by = 5)) + 
+  labs(fill="length") +
+  xlab("chel2 (dostępność planktonu [zagęszczenie Calanus helgolandicus gat. 2])") + 
+  ylab("liczba obserwacji")
+```
+
+###lcop1: dostępność planktonu [zagęszczenie widłonogów gat. 1]
+```{r lcop1Plot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(lcop1, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 80, by = 5)) + 
+  labs(fill="length") +
+  xlab("lcop1 (dostępność planktonu [zagęszczenie widłonogów gat. 1])") + 
+  ylab("liczba obserwacji")
+```
+
+###lcop2: dostępność planktonu [zagęszczenie widłonogów gat. 2]
+```{r lcop2Plot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(lcop2, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 70, by = 5)) + 
+  labs(fill="length") +
+  xlab("lcop2 (dostępność planktonu [zagęszczenie widłonogów gat. 2])") + 
+  ylab("liczba obserwacji")
+```
+
+###fbar: natężenie połowów w regionie [ułamek pozostawionego narybku]
+```{r fbarPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(fbar, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 0.9, by = 0.03)) + 
+  labs(fill="length") +
+  xlab("fbar (natężenie połowów w regionie [ułamek pozostawionego narybku])") + 
+  ylab("liczba obserwacji")
+```
+
+###recr: roczny narybek [liczba śledzi]
+```{r recrPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(recr, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 1600000, by = 50000)) + 
+  labs(fill="length") +
+  xlab("recr (roczny narybek [liczba śledzi])") + 
+  ylab("liczba obserwacji")
+```
+
+###cumf: łączne roczne natężenie połowów w regionie [ułamek pozostawionego narybku]
+```{r cumfPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(cumf, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 0.4, by = 0.02)) + 
+  labs(fill="length") +
+  xlab("cumf (łączne roczne natężenie połowów w regionie [ułamek pozostawionego narybku])") + 
+  ylab("liczba obserwacji")
+```
+
+###totaln: łączna liczba ryb złowionych w ramach połowu [liczba śledzi]
+```{r totalnPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(totaln, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 1100000, by = 50000)) + 
+  labs(fill="length") +
+  xlab("totaln (łączna liczba ryb złowionych w ramach połowu [liczba śledzi])") + 
+  ylab("liczba obserwacji")
+```
+
+###sst: temperatura przy powierzchni wody [°C]
+```{r sstPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(sst, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(12, 15, by = 0.1)) + 
+  labs(fill="length") +
+  xlab("sst (temperatura przy powierzchni wody [°C])") + 
+  ylab("liczba obserwacji")
+```
+
+###sal: poziom zasolenia wody [Knudsen ppt]
+```{r salPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(sal, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(35.35, 35.65, by = 0.03)) + 
+  labs(fill="length") +
+  xlab("sal (poziom zasolenia wody [Knudsen ppt])") + 
+  ylab("liczba obserwacji")
+```
+
+###xmonth: miesiąc połowu [numer miesiąca]
+```{r xmonthPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(xmonth, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(0, 12, by = 1)) + 
+  labs(fill="length") +
+  xlab("xmonth (miesiąc połowu [numer miesiąca])") + 
+  ylab("liczba obserwacji")
+```
+
+###nao: oscylacja północnoatlantycka [mb]
+```{r naoPlot, echo=FALSE, results='hide', message=FALSE, include=TRUE, cache=TRUE}
+ggplot(data=dt, aes(nao, fill=factor(floor(length)))) + 
+  geom_histogram(breaks=seq(-5, 5, by = 1)) + 
+  labs(fill="length") +
+  xlab("nao (oscylacja północnoatlantycka [mb])") + 
+  ylab("liczba obserwacji")
+```
+
+##Korelacja
+
+###Macierz korelacji
+
+```{r include=TRUE, echo=FALSE, cache=TRUE}
+correlation <- round(cor(dt %>% select(length,cfin1,cfin2,chel1,chel2,lcop1,lcop2,fbar,recr,cumf,totaln,sst,sal,nao,period)), 2)
+kable(correlation)
+```
+
+### Korelacja: length-cfin1 (`r correlation["sst", "length"]`)
+
+```{r sstLengthCor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(length, sst)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: cfin2-lcop2 (`r correlation["cfin2", "lcop2"]`)
+
+```{r cfin2Lcop2Cor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(cfin2, lcop2)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: chel1-lcop1 (`r correlation["chel1", "lcop1"]`)
+
+```{r chel1lcop1Cor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(chel1, lcop1)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: chel1-nao (`r correlation["chel1", "nao"]`)
+
+```{r chel1naoCor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(chel1, nao)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: lcop1-nao (`r correlation["lcop1", "nao"]`)
+
+```{r lcop1naoCor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(lcop1, nao)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: sst-nao (`r correlation["sst", "nao"]`)
+
+```{r sstnaoCor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(sst, nao)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: chel2-lcop2 (`r correlation["chel2", "lcop2"]`)
+
+```{r chel2lcop2Cor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(chel2, lcop2)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: fbar-totaln (`r correlation["fbar", "totaln"]`)
+
+```{r fbartotalnCor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(fbar, totaln)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: chel1-cumf (`r correlation["fbar", "cumf"]`)
+
+```{r fbarcumfCor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(fbar, cumf)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+### Korelacja: totaln-cumf (`r correlation["totaln", "cumf"]`)
+
+```{r totalncumfCor, echo=FALSE, include=TRUE, cache=TRUE}
+ggplot(dt, aes(totaln, cumf)) + 
+  geom_point() + 
+  geom_smooth(method="glm")
+```
+
+## Zmiana rozmiaru śledzi w czasie
+
+```{r timePlot, echo=FALSE, include=TRUE, cache=TRUE}
+grouped <- dt %>% 
+  group_by(period, xmonth, cfin1, cfin2, chel1, chel2, lcop1, lcop2, fbar, recr, cumf, totaln, sst, sal, nao) %>%
+  summarise(length=mean(length), n=max(X)) %>% 
+  select(n, length, everything())
+
+divisor <- grouped[nrow(grouped),]$period / 60
+plotData <- data.frame(grouped) %>% 
+    mutate(period=floor(period/divisor)) %>%
+    group_by(period) %>%
+    summarise(length=mean(length)) %>%
+    select(length, everything())
+plot <- ggplot(plotData, aes(x = period, y = length)) + geom_line()
+ggplotly(plot)
+```
+
+## Regresor
+
+### Podział danych
+Dane podzielono na zbiór treningowy i testowy w stosunku 7:3. Przed podziałem przeprowadzono standaryzację danych.
+
+```{r include=FALSE}
+preprocessed <- preProcess(dt[,-c(1,2)], method = c("center", "scale"))
+dt2 <- predict(preprocessed, dt)
+set.seed(111)
+inTraining <- createDataPartition(y = dt2$length, p = 0.70, list = FALSE)
+training <- dt2[inTraining, ]
+testing <- dt2[-inTraining, ]
+```
+
+### Utworzenie modelu i walidacja
+Do utworzenia modelu wykorzystano algorytm kNN z użyciem Repeated Cross Validation. Przeprowadzone próby wykazały, że zbudowany przez niego model najlepiej radzi sobie z predykcją długości śledzia. Niewiele gorsze wyniki dawał algorytm Stochastic Gradient boosting oraz Random Forest. Ten ostatni jednak nie sprawdza dobrze się przy analizie ważności atrybutów.
+
+```{r regression, include=TRUE, cache=TRUE}
+
+set.seed(111)
+
+ctrl <- trainControl(method="repeatedcv", number = 2,  repeats = 5)
+
+fit <- train(length ~ xmonth+cfin1+cfin2+chel1+chel2+lcop1+lcop2+fbar+recr+cumf+totaln+sst+sal+nao,
+             data = training,
+             method = "knn",
+             trControl = ctrl)
+
+predictions <- predict(fit, testing)
+rmse <- sqrt(mean((testing$length - predictions)^2))
+rSquare <- 1 - (sum((testing$length-predictions)^2)/sum((testing$length-mean(testing$length))^2))
+```
+
+Wskaźniki RMSE i R^2
+
+```{r measures, include=TRUE}
+measures <- rbind(
+    cbind(dane="treningowe", fit$results[1,c("RMSE", "Rsquared")]), 
+    data.frame(dane="testowe", RMSE=rmse, Rsquared=rSquare))
+kable(measures)
+```
+
+### Analiza ważności atrybutów
+```{r importance, echo=FALSE, include=TRUE}
+imp <- varImp(fit)$importance
+imp$atrybut <- rownames(imp)
+imp <- imp %>% arrange(desc(Overall)) %>% select(atrybut, ważność=Overall)
+kable(imp)
+```
+
+Z przeprowadzonej analizy wynika, że najważniejszym atrybutem jest sst, czyli temperatura przy powierzchni wody. Powyższą zależność można było już zauważyć przy analizie korelacji, gdzie sst okazało się być najlepiej skorelowanym (ujemnie) atrybutem z length.
+
+## Regresor dla danych pogrupowanych po atrybucie period
+
+Alternatywnie podjęto próbę nauczenia regresora na zredukowanych danych. Korzystając z wcześniej dodanego atrybutu period pogrupowano dane treningowe po wszystkich atrybutach za wyjątkiem X i length, a następnie wyznaczono wartość średnią dla length dla każdej grupy: 
+
+```{r groupedByPeriod, include=TRUE}
+groupedByPeriod <- training %>% 
+  group_by(period, xmonth, cfin1, cfin2, chel1, chel2, lcop1, lcop2, fbar, recr, cumf, totaln, sst, sal, nao) %>%
+  summarise(length=mean(length), n=max(X)) %>% 
+  select(n, length, everything())
+
+training <- data.frame(groupedByPeriod)
+```
+
+Takie grupowanie pozwoliło zredukować liczność zbioru treningowego do zaledwie `r nrow(groupedByPeriod)` wierszy. Intuicja stojąca za takim podejściem jest nastepująca: skoro dane w grupie różnią się jedynie wartością atrybutu length to po wyliczeniu średniej dla tego atrybutu w grupie nie tracimy żadnej informacji, natomiast zredukowany rozmiar zbioru pozwoli wielokrotnie przyśpieszyć działanie algorytmu uczącego. 
+
+### Utworzenie modelu i walidacja
+
+W tym przypadku do utworzenia modelu użyto identycznego algorytmu z identycznymi parametrami jak poprzednio.
+
+```{r regression2, include=TRUE, cache=FALSE}
+set.seed(111)
+
+ctrl <- trainControl(method="repeatedcv", number = 2,  repeats = 5)
+
+fit <- train(length ~ xmonth+cfin1+cfin2+chel1+chel2+lcop1+lcop2+fbar+recr+cumf+totaln+sst+sal+nao,
+             data = training,
+             method = "knn",
+             trControl = ctrl)
+
+predictions <- predict(fit, testing)
+rmse <- sqrt(mean((testing$length - predictions)^2))
+rSquare <- 1 - (sum((testing$length-predictions)^2)/sum((testing$length-mean(testing$length))^2))
+```
+
+Wskaźniki RMSE i R^2
+
+```{r measures2, include=TRUE}
+measures <- rbind(
+    cbind(dane="treningowe", fit$results[1,c("RMSE", "Rsquared")]), 
+    data.frame(dane="testowe", RMSE=rmse, Rsquared=rSquare))
+kable(measures)
+```
+
+Jak widać wskaźniki dla danych treningowych znacznie się polepszyły. Niestety dla danych testowych otrzymaliśmy minimalnie gorsze rezultaty. Podejście to nie poskutkowało uzyskaniem lepszych wyników, ale zgodnie z oczekiwaniem model udało się zbudować wielokrotnie szybciej (o rząd wielkości). Dla całego zbioru danych uczenie zajmuje ok. 3 minut, natomiast dla zbioru zredukowanego zaledwie 2 sekundy. Oczywiście dla tak niewielkiego zbioru i stosunkowo niedługiego czasu przetwarzania nie warto tracić na dokładności wyników kosztem kilku minut oczekiwania. Można sobie jednak wyobrazić sytuacje gdzie wielokrotne zredukowanie rozmiaru problemu przy stosunkowo niedużej utracie dokładności jest wysoce pożądane.
+
+### Analiza ważności atrybutów
+```{r importance2, echo=FALSE, include=TRUE}
+imp <- varImp(fit)$importance
+imp$atrybut <- rownames(imp)
+imp <- imp %>% arrange(desc(Overall)) %>% select(atrybut, ważność=Overall)
+kable(imp)
+```
+
+W tym przypadku podobnie jak poprzednio najważniejszym atrybutem okazał się sst. Dla pozostałych atrybutów wartości ważności nie różnią się znacząco.
